@@ -123,12 +123,30 @@ There are no tests. Verify behavior by running the installed app (below).
 - Don't name sessions; the user prefers Rex's own names.
 
 **Neovim**
-- Neovim 0.10+ is two processes. Rex reports the UI process, but the RPC
-  socket belongs to its child server process:
-  `$TMPDIR/nvim.$USER/<random>/nvim.<child pid>.0`. Match sockets by parent
-  pid (`sysctl` `KERN_PROC_PID`); `pgrep -P` is unreliable from sandboxes.
-- Use the binary path Rex reports for `nvim --server … --remote-expr`. The
-  GUI app has no PATH. Calls have a 3s timeout and fall back to a new session.
+- Neovim 0.10+ is two processes. Rex reports the UI process as a pane's
+  foreground, but the RPC socket belongs to its child server process:
+  `$TMPDIR/nvim.$USER/<random>/nvim.<child pid>.0`. Relate them by parent pid
+  (`sysctl` `KERN_PROC_PID`); `pgrep -P` is unreliable from sandboxes. Sockets
+  of exited Neovims linger, so check the pid is alive.
+- Discovery starts from those sockets, not from Rex: the server process's cwd
+  (`proc_pidinfo` `PROC_PIDVNODEPATHINFO`, which follows `:cd`), its binary
+  (`proc_pidpath`), and its environment (`sysctl` `KERN_PROCARGS2`), where
+  `REX_SESSION`/`REX_BLOCK` inherited from the Rex shell name its pane. Rex is
+  asked once per matching candidate, to confirm it's the pane's foreground.
+  This replaced one `rex` call per pane in every session (~200 ms).
+- Files are opened via `luaeval('vim.schedule(…)')`, so `--remote-expr` returns
+  before Neovim runs filetype plugins and LSP for them (up to ~190 ms). Errors
+  inside Neovim after that aren't reported back.
+- The GUI app has no PATH; use the server process's binary path for
+  `nvim --server`. Calls have a 3s timeout and fall back to a new session.
+
+**Performance**
+- A forward is about 350 ms from `open` to exit: ~150 ms is macOS launching the
+  app (AppKit and LaunchServices; not much to gain), each `rex` CLI call costs
+  ~10–15 ms, and `nvim --remote-expr` ~3 ms. `NSApp.terminate` vs `exit(0)`
+  made no measurable difference.
+- `rex focus -s S BLOCK` also selects the block's window, and `rex send` text
+  ending in `\r` presses Enter, which saves calls.
 
 **GUI app environment**
 - No shell PATH. `rex` is found via config, then PATH, then the newest

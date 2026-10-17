@@ -139,28 +139,59 @@ func gitRoot(of start: URL) -> URL? {
 /// A Neovim running in the foreground of a Rex pane.
 struct NvimInstance {
   let session: String
-  let window: String
   let block: String
   let binary: URL
   let server: String
   let cwd: URL
 }
 
-/// Neovim's UI process runs the editor in a child process, which listens on
-/// $TMPDIR/nvim.$USER/<random>/nvim.<pid>.0. Older versions listen in the UI process itself.
-func nvimServer(forUI uiPID: pid_t) -> String? {
+/// Every Neovim's editor process listens on $TMPDIR/nvim.$USER/<random>/nvim.<pid>.0.
+/// (Neovim 0.10+ runs the editor in a child of the UI process Rex sees.) Sockets of
+/// exited Neovims linger, so callers check the process is still alive.
+func nvimSockets() -> [(pid: pid_t, path: String)] {
   let fm = FileManager.default
   let base = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("nvim.\(NSUserName())")
-  for dir in (try? fm.contentsOfDirectory(atPath: base.path)) ?? [] {
+  return ((try? fm.contentsOfDirectory(atPath: base.path)) ?? []).flatMap { dir in
     let dirURL = base.appendingPathComponent(dir)
-    for file in (try? fm.contentsOfDirectory(atPath: dirURL.path)) ?? [] {
-      guard file.hasPrefix("nvim."), file.hasSuffix(".0"), let pid = pid_t(file.dropFirst(5).dropLast(2)) else { continue }
-      if pid == uiPID || parentPID(of: pid) == uiPID {
-        return dirURL.appendingPathComponent(file).path
-      }
+    return ((try? fm.contentsOfDirectory(atPath: dirURL.path)) ?? []).compactMap { file -> (pid_t, String)? in
+      guard file.hasPrefix("nvim."), file.hasSuffix(".0"), let pid = pid_t(file.dropFirst(5).dropLast(2)) else { return nil }
+      return (pid, dirURL.appendingPathComponent(file).path)
     }
   }
-  return nil
+}
+
+/// A process's current working directory, or nil if it isn't running.
+func processCwd(_ pid: pid_t) -> URL? {
+  var info = proc_vnodepathinfo()
+  let size = Int32(MemoryLayout<proc_vnodepathinfo>.size)
+  guard proc_pidinfo(pid, PROC_PIDVNODEPATHINFO, 0, &info, size) == size else { return nil }
+  let path = withUnsafeBytes(of: info.pvi_cdir.vip_path) { String(decoding: $0.prefix { $0 != 0 }, as: UTF8.self) }
+  return path.isEmpty ? nil : URL(fileURLWithPath: path)
+}
+
+func processPath(_ pid: pid_t) -> String? {
+  var buffer = [CChar](repeating: 0, count: Int(MAXPATHLEN) * 4)
+  guard proc_pidpath(pid, &buffer, UInt32(buffer.count)) > 0 else { return nil }
+  return String(cString: buffer)
+}
+
+/// A process's environment, from KERN_PROCARGS2: argc, the executable path, then
+/// argv and environ as NUL-terminated strings.
+func processEnvironment(_ pid: pid_t) -> [String: String] {
+  var mib: [Int32] = [CTL_KERN, KERN_PROCARGS2, pid]
+  var size = 0
+  guard sysctl(&mib, 3, nil, &size, nil, 0) == 0, size > MemoryLayout<Int32>.size else { return [:] }
+  var buffer = [UInt8](repeating: 0, count: size)
+  guard sysctl(&mib, 3, &buffer, &size, nil, 0) == 0 else { return [:] }
+  let argc = Int(buffer.withUnsafeBytes { $0.load(as: Int32.self) })
+  let strings = buffer[MemoryLayout<Int32>.size..<size].split(separator: 0).map { String(decoding: $0, as: UTF8.self) }
+  // strings[0] is the executable path; argv follows, then the environment.
+  var environment: [String: String] = [:]
+  for entry in strings.dropFirst(1 + argc) {
+    guard let equals = entry.firstIndex(of: "=") else { continue }
+    environment[String(entry[..<equals])] = String(entry[entry.index(after: equals)...])
+  }
+  return environment
 }
 
 /// Quote a string as a Vim single-quoted string literal.
@@ -216,12 +247,12 @@ struct Forwarder {
       }
     }
 
-    var lastShown: (session: String, window: String?, block: String?)?
+    var lastShown: (session: String, block: String?)?
     for group in groups {
       if config.reuseNvim ?? true, let repo = group.repo {
         if let nvim = runningNvims(in: repo).first(where: { open(group.files, in: $0) }) {
           log("opened \(group.files.map(\.path)) in running nvim in \(nvim.block) (cwd \(nvim.cwd.path))")
-          lastShown = (nvim.session, nvim.window, nvim.block)
+          lastShown = (nvim.session, nvim.block)
           continue
         }
       }
@@ -254,17 +285,16 @@ struct Forwarder {
               let block = (windows.first?["block_ids"] as? [String])?.first else {
           throw ForwardError("Couldn't read the terminal ID from rex new.")
         }
-        let line = command.map(shellQuote).joined(separator: " ")
-        for input in [["send", "-s", session, "-b", block, line], ["send-key", "-s", session, "-b", block, "enter"]] {
-          let sent = try run(rex, input)
-          guard sent.status == 0 else { throw ForwardError("rex \(input[0]) failed (\(sent.status)): \(sent.stderr)") }
-        }
+        // A trailing carriage return presses Enter.
+        let line = command.map(shellQuote).joined(separator: " ") + "\r"
+        let sent = try run(rex, ["send", "-s", session, "-b", block, line])
+        guard sent.status == 0 else { throw ForwardError("rex send failed (\(sent.status)): \(sent.stderr)") }
       }
       log("opened \(group.files.map(\.path)) in \(session) (cwd \(group.cwd.path))")
-      lastShown = (session, nil, nil)
+      lastShown = (session, nil)
     }
 
-    if let lastShown { show(session: lastShown.session, window: lastShown.window, block: lastShown.block) }
+    if let lastShown { show(session: lastShown.session, block: lastShown.block) }
   }
 
   /// Run rex and parse its JSON output.
@@ -273,45 +303,38 @@ struct Forwarder {
     return try? JSONSerialization.jsonObject(with: result.stdout) as? [String: Any]
   }
 
-  /// Neovims in the foreground of any Rex pane whose working directory is inside
+  /// Neovims in the foreground of a Rex pane whose working directory is inside
   /// `repo`, those at its root first.
+  ///
+  /// Found from the processes themselves rather than by asking Rex about every
+  /// pane: each Neovim's socket names its pid, the process's cwd says where it's
+  /// working, and the REX_SESSION and REX_BLOCK it inherited from its shell say
+  /// which pane it's in. Rex is only asked to confirm a match.
   private func runningNvims(in repo: URL) -> [NvimInstance] {
-    let sessions = (rexJSON(["ls", "--json"])?["sessions"] as? [[String: Any]] ?? []).compactMap { $0["session_id"] as? String }
-    var panes: [(session: String, window: String, block: String)] = []
-    for session in sessions {
-      for block in rexJSON(["block", "ls", "-s", session, "--json"])?["blocks"] as? [[String: Any]] ?? [] {
-        if let id = block["block_id"] as? String, let window = block["window_id"] as? String {
-          panes.append((session, window, id))
-        }
-      }
-    }
-
     var found: [NvimInstance] = []
-    let lock = NSLock()
-    DispatchQueue.concurrentPerform(iterations: panes.count) { index in
-      let pane = panes[index]
-      guard let process = rexJSON(["block", "call", "-s", pane.session, "-b", pane.block, "process"]),
-            let foreground = process["foreground"] as? [String: Any],
-            foreground["name"] as? String == "nvim",
-            let pid = foreground["pid"] as? Int, let path = foreground["path"] as? String,
-            let cwdPath = foreground["cwd"] as? String,
-            gitRoot(of: URL(fileURLWithPath: cwdPath)) == repo,
-            let server = nvimServer(forUI: pid_t(pid)) else { return }
-      let nvim = NvimInstance(session: pane.session, window: pane.window, block: pane.block,
-                              binary: URL(fileURLWithPath: path), server: server,
-                              cwd: URL(fileURLWithPath: cwdPath).resolvingSymlinksInPath())
-      lock.lock(); found.append(nvim); lock.unlock()
+    for socket in nvimSockets() {
+      guard let cwd = processCwd(socket.pid)?.resolvingSymlinksInPath(), gitRoot(of: cwd) == repo else { continue }
+      let environment = processEnvironment(socket.pid)
+      guard let session = environment["REX_SESSION"], let block = environment["REX_BLOCK"],
+            let binary = processPath(socket.pid) else { continue }
+      // It must be what the pane shows, not suspended or nested inside another program.
+      guard let foreground = rexJSON(["block", "call", "-s", session, "-b", block, "process"])?["foreground"] as? [String: Any],
+            let uiPID = (foreground["pid"] as? Int).map(pid_t.init),
+            uiPID == socket.pid || parentPID(of: socket.pid) == uiPID else { continue }
+      found.append(NvimInstance(session: session, block: block, binary: URL(fileURLWithPath: binary),
+                                server: socket.path, cwd: cwd))
     }
     return found.filter { $0.cwd == repo } + found.filter { $0.cwd != repo }
   }
 
   /// Ask a running Neovim to open the files, giving up if it doesn't answer promptly
-  /// (for example, while it's waiting at a prompt).
+  /// (for example, while it's waiting at a prompt). The files are opened on Neovim's
+  /// next tick, so this doesn't wait for filetype plugins and language servers.
   private func open(_ files: [URL], in nvim: NvimInstance) -> Bool {
     let command = config.openCommand ?? "tab drop"
-    let expression = files
-      .map { "execute(\(vimQuote(command)) .. ' ' .. fnameescape(\(vimQuote($0.path))))" }
-      .joined(separator: " .. ")
+    let paths = "[" + files.map { vimQuote($0.path) }.joined(separator: ", ") + "]"
+    let lua = "vim.schedule(function() for _, f in ipairs(_A[2]) do vim.cmd(_A[1] .. ' ' .. vim.fn.fnameescape(f)) end end)"
+    let expression = "luaeval(\(vimQuote(lua)), [\(vimQuote(command)), \(paths)])"
     guard let result = try? run(nvim.binary, ["--server", nvim.server, "--remote-expr", expression], timeout: 3),
           result.status == 0 else {
       log("running nvim in \(nvim.block) didn't open the files; starting a new session")
@@ -320,8 +343,9 @@ struct Forwarder {
     return true
   }
 
-  /// Switch this Mac's Rex app to the session (and pane), launching Rex if needed.
-  private func show(session: String, window: String? = nil, block: String? = nil) {
+  /// Switch this Mac's Rex app to the session, launching Rex if needed. Focusing a
+  /// pane also selects its tab.
+  private func show(session: String, block: String? = nil) {
     if let block {
       _ = try? run(rex, ["focus", "-s", session, block])
     }
@@ -341,9 +365,7 @@ struct Forwarder {
       return
     }
     do {
-      var arguments = ["-C", client, "do", "session.select", "session_id=\(session)"]
-      if let window { arguments.append("window_id=\(window)") }
-      let result = try run(rex, arguments)
+      let result = try run(rex, ["-C", client, "do", "session.select", "session_id=\(session)"])
       if result.status != 0 { log("session.select failed: \(result.stderr)") }
     } catch {
       log("session.select failed: \(error)")

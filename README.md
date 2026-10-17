@@ -20,10 +20,12 @@ icon, hands each file off to Rex, and quits. Problems are written to the log.
    instead of closing the session.
 4. Switches this Mac's Rex app to the session and brings Rex to the front.
 
-To find running Neovims, it asks Rex for each pane's foreground process and its
-working directory (`rex block call … process`). It then talks to that Neovim
-over its RPC socket (`nvim --server … --remote-expr`). If the Neovim doesn't
-answer within 3 seconds, it falls back to a new session.
+To find running Neovims, it looks at the processes behind Neovim's RPC sockets:
+each one's working directory, and the `REX_SESSION` and `REX_BLOCK` it inherited
+from its Rex shell. Rex is only asked to confirm that the Neovim is what its pane
+shows. It then asks that Neovim to open the files over the socket
+(`nvim --server … --remote-expr`), without waiting for them to finish loading.
+If the Neovim doesn't answer within 3 seconds, it falls back to a new session.
 
 Opening several files from the same repository at once puts them in one
 session, as Neovim tabs.
