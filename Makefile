@@ -7,9 +7,10 @@ DEVICONS ?= $(HOME)/.local/share/nvim/lazy/nvim-web-devicons
 BUILD := build
 APP := $(BUILD)/$(APP_NAME).app
 INSTALLED := $(INSTALL_DIR)/$(APP_NAME).app
+FONT := assets/fonts/SymbolsNerdFont-Regular.ttf
 LSREGISTER := /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
 
-.PHONY: all app install uninstall clean devicons
+.PHONY: all app icons install uninstall clean devicons
 
 all: app
 
@@ -17,15 +18,29 @@ $(BUILD)/ft-forwarder: Sources/main.swift
 	@mkdir -p $(BUILD)
 	swiftc -O -target arm64-apple-macos13.0 -o $@ $<
 
-$(BUILD)/Info.plist: tools/gen-plist.swift data/devicons.json data/include.txt data/exclude.txt $(wildcard $(BUILD)/icons/*.icns)
+# Writes both Info.plist and types.json.
+$(BUILD)/Info.plist: tools/gen-plist.swift data/devicons.json data/include.txt data/exclude.txt
 	swift tools/gen-plist.swift data $(BUILD) "$(APP_NAME)" $(BUNDLE_ID) $(VERSION)
 
-app: $(BUILD)/ft-forwarder $(BUILD)/Info.plist
+$(BUILD)/gen-icons: tools/gen-icons.swift
+	@mkdir -p $(BUILD)
+	swiftc -O -o $@ $<
+
+$(BUILD)/icons/.stamp: $(BUILD)/gen-icons $(BUILD)/Info.plist $(FONT)
+	rm -rf $(BUILD)/icons
+	$(BUILD)/gen-icons $(BUILD)/types.json $(FONT) $(BUILD)/icons
+	touch $@
+
+icons: $(BUILD)/icons/.stamp
+
+app: $(BUILD)/ft-forwarder $(BUILD)/Info.plist $(BUILD)/icons/.stamp
 	rm -rf "$(APP)"
 	mkdir -p "$(APP)/Contents/MacOS" "$(APP)/Contents/Resources"
 	cp $(BUILD)/ft-forwarder "$(APP)/Contents/MacOS/"
 	cp $(BUILD)/Info.plist "$(APP)/Contents/"
-	if ls $(BUILD)/icons/*.icns >/dev/null 2>&1; then cp $(BUILD)/icons/*.icns "$(APP)/Contents/Resources/"; fi
+	# A unique build number per build, so macOS drops its cached icons on install.
+	/usr/libexec/PlistBuddy -c "Set :CFBundleVersion $(VERSION).$$(date +%s)" "$(APP)/Contents/Info.plist"
+	cp $(BUILD)/icons/*.icns "$(APP)/Contents/Resources/"
 	codesign --force --sign - "$(APP)"
 
 install: app

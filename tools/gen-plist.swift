@@ -58,7 +58,9 @@ for icon in devicons.sorted(by: { $0.ext.lowercased() < $1.ext.lowercased() }) {
 
   let uti: String
   let imported: Bool
-  if let type = UTType(filenameExtension: ext), !type.isDynamic {
+  // Types declared by an installed copy of this app don't count as known to macOS,
+  // or rebuilding would stop declaring them.
+  if let type = UTType(filenameExtension: ext), !type.isDynamic, !type.identifier.hasPrefix("\(bundleID).ext.") {
     guard include.contains(ext) || type.conforms(to: .text) else { continue }
     uti = type.identifier
     imported = false
@@ -82,34 +84,25 @@ for icon in devicons.sorted(by: { $0.ext.lowercased() < $1.ext.lowercased() }) {
 }
 
 // A system type shared by several extensions takes its name and icon from the
-// type's preferred extension (public.toml claims cfg and toml; use toml's).
+// type's preferred extension (public.toml claims cfg and toml; use toml's), and
+// lists that extension first so the icon is labeled with it.
 let deviconByExt = Dictionary(devicons.map { ($0.ext.lowercased(), $0) }, uniquingKeysWith: { first, _ in first })
 for (index, type) in docTypes.enumerated() where !type.imported && type.exts.count > 1 {
   guard let preferred = UTType(type.uti)?.preferredFilenameExtension, type.exts.contains(preferred),
         let icon = deviconByExt[preferred] else { continue }
-  docTypes[index] = DocType(icon: type.icon, name: icon.name, glyph: icon.glyph, color: icon.color, uti: type.uti, exts: type.exts, imported: false)
+  let exts = [preferred] + type.exts.filter { $0 != preferred }
+  docTypes[index] = DocType(icon: type.icon, name: icon.name, glyph: icon.glyph, color: icon.color, uti: type.uti, exts: exts, imported: false)
 }
 
-// Per-type icons are used when the icon generator has produced them;
-// otherwise macOS draws a page with the app icon on it.
-let iconsDir = outDir.appendingPathComponent("icons")
-func hasIcon(_ name: String) -> Bool {
-  FileManager.default.fileExists(atPath: iconsDir.appendingPathComponent("\(name).icns").path)
-}
-
+// Icons are rendered by gen-icons.swift from types.json.
 let documentTypes: [[String: Any]] = docTypes.map { type in
-  var entry: [String: Any] = [
+  [
     "CFBundleTypeName": type.name,
     "CFBundleTypeRole": "Editor",
     "LSHandlerRank": "Default",
     "LSItemContentTypes": [type.uti],
+    "CFBundleTypeIconFile": type.icon,
   ]
-  if hasIcon(type.icon) {
-    entry["CFBundleTypeIconFile"] = type.icon
-  } else {
-    entry["CFBundleTypeIconSystemGenerated"] = 1
-  }
-  return entry
 }
 
 let importedTypes: [[String: Any]] = docTypes.filter(\.imported).map { type in
@@ -121,7 +114,7 @@ let importedTypes: [[String: Any]] = docTypes.filter(\.imported).map { type in
   ]
 }
 
-var plist: [String: Any] = [
+let plist: [String: Any] = [
   "CFBundleDevelopmentRegion": "en",
   "CFBundleExecutable": "ft-forwarder",
   "CFBundleIdentifier": bundleID,
@@ -135,12 +128,10 @@ var plist: [String: Any] = [
   // Never show a Dock icon or menu bar; the app forwards and exits.
   "LSUIElement": true,
   "NSHighResolutionCapable": true,
+  "CFBundleIconFile": "AppIcon",
   "CFBundleDocumentTypes": documentTypes,
   "UTImportedTypeDeclarations": importedTypes,
 ]
-if FileManager.default.fileExists(atPath: iconsDir.appendingPathComponent("AppIcon.icns").path) {
-  plist["CFBundleIconFile"] = "AppIcon"
-}
 
 try FileManager.default.createDirectory(at: outDir, withIntermediateDirectories: true)
 try PropertyListSerialization.data(fromPropertyList: plist, format: .xml, options: 0)

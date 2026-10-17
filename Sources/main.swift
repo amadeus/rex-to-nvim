@@ -41,6 +41,11 @@ struct Config: Decodable {
   var keepShell: Bool?
   /// Working directory: "gitRoot" (the file's git repository, else its folder) or "parent".
   var cwd: String?
+  /// Open files from a git repository in a Neovim already running in that repository,
+  /// instead of starting a new session. Default true.
+  var reuseNvim: Bool?
+  /// Ex command a reused Neovim opens each file with. Default "tab drop".
+  var openCommand: String?
 
   static func load() -> Config {
     let url = home.appendingPathComponent(".config/ft-forwarder/config.json")
@@ -62,8 +67,10 @@ struct ProcessResult {
   let stderr: String
 }
 
+/// Run a command to completion. With a timeout, a command still running after it
+/// is terminated (and reports a nonzero status).
 @discardableResult
-func run(_ executable: URL, _ arguments: [String]) throws -> ProcessResult {
+func run(_ executable: URL, _ arguments: [String], timeout: TimeInterval? = nil) throws -> ProcessResult {
   let process = Process()
   process.executableURL = executable
   process.arguments = arguments
@@ -71,6 +78,11 @@ func run(_ executable: URL, _ arguments: [String]) throws -> ProcessResult {
   process.standardOutput = stdout
   process.standardError = stderr
   try process.run()
+  if let timeout {
+    DispatchQueue.global().asyncAfter(deadline: .now() + timeout) {
+      if process.isRunning { process.terminate() }
+    }
+  }
   // Drain stderr concurrently so a chatty command can't fill the pipe and stall.
   var errData = Data()
   let errDone = DispatchSemaphore(value: 0)
@@ -95,6 +107,65 @@ func shellQuote(_ word: String) -> String {
     return "'" + word.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "'", with: "\\'") + "'"
   }
   return "'" + word.replacingOccurrences(of: "'", with: "'\\''") + "'"
+}
+
+func parentPID(of pid: pid_t) -> pid_t? {
+  var info = kinfo_proc()
+  var size = MemoryLayout<kinfo_proc>.stride
+  var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_PID, pid]
+  guard sysctl(&mib, 4, &info, &size, nil, 0) == 0, size > 0 else { return nil }
+  return info.kp_eproc.e_ppid
+}
+
+// MARK: - Git
+
+/// The nearest folder containing .git, which is a folder in a normal clone and a
+/// file in a worktree or submodule.
+func gitRoot(of start: URL) -> URL? {
+  var dir = start.resolvingSymlinksInPath()
+  // Stop below the home folder, so a dotfiles repo at ~ doesn't swallow everything.
+  let homePath = home.resolvingSymlinksInPath().path
+  while dir.path != "/" && dir.path != homePath {
+    if FileManager.default.fileExists(atPath: dir.appendingPathComponent(".git").path) {
+      return dir
+    }
+    dir = dir.deletingLastPathComponent()
+  }
+  return nil
+}
+
+// MARK: - Neovim
+
+/// A Neovim running in the foreground of a Rex pane.
+struct NvimInstance {
+  let session: String
+  let window: String
+  let block: String
+  let binary: URL
+  let server: String
+  let cwd: URL
+}
+
+/// Neovim's UI process runs the editor in a child process, which listens on
+/// $TMPDIR/nvim.$USER/<random>/nvim.<pid>.0. Older versions listen in the UI process itself.
+func nvimServer(forUI uiPID: pid_t) -> String? {
+  let fm = FileManager.default
+  let base = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("nvim.\(NSUserName())")
+  for dir in (try? fm.contentsOfDirectory(atPath: base.path)) ?? [] {
+    let dirURL = base.appendingPathComponent(dir)
+    for file in (try? fm.contentsOfDirectory(atPath: dirURL.path)) ?? [] {
+      guard file.hasPrefix("nvim."), file.hasSuffix(".0"), let pid = pid_t(file.dropFirst(5).dropLast(2)) else { continue }
+      if pid == uiPID || parentPID(of: pid) == uiPID {
+        return dirURL.appendingPathComponent(file).path
+      }
+    }
+  }
+  return nil
+}
+
+/// Quote a string as a Vim single-quoted string literal.
+func vimQuote(_ string: String) -> String {
+  "'" + string.replacingOccurrences(of: "'", with: "''") + "'"
 }
 
 // MARK: - Forwarding
@@ -132,18 +203,29 @@ struct Forwarder {
 
   func forward(_ urls: [URL]) throws {
     // One session per working directory, with every file from it open in tabs.
-    var groups: [(cwd: URL, files: [URL])] = []
+    var groups: [(cwd: URL, repo: URL?, files: [URL])] = []
     for url in urls {
-      let cwd = workingDirectory(for: url)
+      let isDirectory = (try? url.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory ?? false
+      let folder = isDirectory ? url : url.deletingLastPathComponent()
+      let repo = gitRoot(of: folder)
+      let cwd = config.cwd == "parent" ? folder : repo ?? folder
       if let index = groups.firstIndex(where: { $0.cwd == cwd }) {
         groups[index].files.append(url)
       } else {
-        groups.append((cwd, [url]))
+        groups.append((cwd, repo, [url]))
       }
     }
 
-    var lastSession: String?
+    var lastShown: (session: String, window: String?, block: String?)?
     for group in groups {
+      if config.reuseNvim ?? true, let repo = group.repo {
+        if let nvim = runningNvims(in: repo).first(where: { open(group.files, in: $0) }) {
+          log("opened \(group.files.map(\.path)) in running nvim in \(nvim.block) (cwd \(nvim.cwd.path))")
+          lastShown = (nvim.session, nvim.window, nvim.block)
+          continue
+        }
+      }
+
       // Paths inside the working directory are passed relative to it, which reads
       // better in shell history.
       let root = group.cwd.resolvingSymlinksInPath().path + "/"
@@ -155,9 +237,8 @@ struct Forwarder {
       let command = template.flatMap { part in
         part == "{files}" ? paths : [part.replacingOccurrences(of: "{file}", with: paths[0])]
       }
-      let label = group.files.count == 1 ? group.files[0].lastPathComponent : group.cwd.lastPathComponent
       let keepShell = config.keepShell ?? true
-      var arguments = ["new", label, "-c", group.cwd.path, "--json"]
+      var arguments = ["new", "-c", group.cwd.path, "--json"]
       if !keepShell { arguments += ["--"] + command }
       let result = try run(rex, arguments)
       guard result.status == 0 else {
@@ -180,32 +261,70 @@ struct Forwarder {
         }
       }
       log("opened \(group.files.map(\.path)) in \(session) (cwd \(group.cwd.path))")
-      lastSession = session
+      lastShown = (session, nil, nil)
     }
 
-    if let lastSession { show(session: lastSession) }
+    if let lastShown { show(session: lastShown.session, window: lastShown.window, block: lastShown.block) }
   }
 
-  private func workingDirectory(for url: URL) -> URL {
-    let isDirectory = (try? url.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory ?? false
-    let start = isDirectory ? url : url.deletingLastPathComponent()
-    guard config.cwd != "parent" else { return start }
+  /// Run rex and parse its JSON output.
+  private func rexJSON(_ arguments: [String]) -> [String: Any]? {
+    guard let result = try? run(rex, arguments, timeout: 5), result.status == 0 else { return nil }
+    return try? JSONSerialization.jsonObject(with: result.stdout) as? [String: Any]
+  }
 
-    // The nearest folder containing .git, which is a folder in a normal clone and a
-    // file in a worktree or submodule.
-    var dir = start.standardizedFileURL
-    // Stop below the home folder, so a dotfiles repo at ~ doesn't swallow everything.
-    while dir.path != "/" && dir.path != home.standardizedFileURL.path {
-      if FileManager.default.fileExists(atPath: dir.appendingPathComponent(".git").path) {
-        return dir
+  /// Neovims in the foreground of any Rex pane whose working directory is inside
+  /// `repo`, those at its root first.
+  private func runningNvims(in repo: URL) -> [NvimInstance] {
+    let sessions = (rexJSON(["ls", "--json"])?["sessions"] as? [[String: Any]] ?? []).compactMap { $0["session_id"] as? String }
+    var panes: [(session: String, window: String, block: String)] = []
+    for session in sessions {
+      for block in rexJSON(["block", "ls", "-s", session, "--json"])?["blocks"] as? [[String: Any]] ?? [] {
+        if let id = block["block_id"] as? String, let window = block["window_id"] as? String {
+          panes.append((session, window, id))
+        }
       }
-      dir = dir.deletingLastPathComponent()
     }
-    return start
+
+    var found: [NvimInstance] = []
+    let lock = NSLock()
+    DispatchQueue.concurrentPerform(iterations: panes.count) { index in
+      let pane = panes[index]
+      guard let process = rexJSON(["block", "call", "-s", pane.session, "-b", pane.block, "process"]),
+            let foreground = process["foreground"] as? [String: Any],
+            foreground["name"] as? String == "nvim",
+            let pid = foreground["pid"] as? Int, let path = foreground["path"] as? String,
+            let cwdPath = foreground["cwd"] as? String,
+            gitRoot(of: URL(fileURLWithPath: cwdPath)) == repo,
+            let server = nvimServer(forUI: pid_t(pid)) else { return }
+      let nvim = NvimInstance(session: pane.session, window: pane.window, block: pane.block,
+                              binary: URL(fileURLWithPath: path), server: server,
+                              cwd: URL(fileURLWithPath: cwdPath).resolvingSymlinksInPath())
+      lock.lock(); found.append(nvim); lock.unlock()
+    }
+    return found.filter { $0.cwd == repo } + found.filter { $0.cwd != repo }
   }
 
-  /// Switch this Mac's Rex app to the session, launching Rex if needed.
-  private func show(session: String) {
+  /// Ask a running Neovim to open the files, giving up if it doesn't answer promptly
+  /// (for example, while it's waiting at a prompt).
+  private func open(_ files: [URL], in nvim: NvimInstance) -> Bool {
+    let command = config.openCommand ?? "tab drop"
+    let expression = files
+      .map { "execute(\(vimQuote(command)) .. ' ' .. fnameescape(\(vimQuote($0.path))))" }
+      .joined(separator: " .. ")
+    guard let result = try? run(nvim.binary, ["--server", nvim.server, "--remote-expr", expression], timeout: 3),
+          result.status == 0 else {
+      log("running nvim in \(nvim.block) didn't open the files; starting a new session")
+      return false
+    }
+    return true
+  }
+
+  /// Switch this Mac's Rex app to the session (and pane), launching Rex if needed.
+  private func show(session: String, window: String? = nil, block: String? = nil) {
+    if let block {
+      _ = try? run(rex, ["focus", "-s", session, block])
+    }
     let choice = config.client ?? "auto"
     guard choice != "none" else { return }
 
@@ -222,7 +341,9 @@ struct Forwarder {
       return
     }
     do {
-      let result = try run(rex, ["-C", client, "do", "session.select", "session_id=\(session)"])
+      var arguments = ["-C", client, "do", "session.select", "session_id=\(session)"]
+      if let window { arguments.append("window_id=\(window)") }
+      let result = try run(rex, arguments)
       if result.status != 0 { log("session.select failed: \(result.stderr)") }
     } catch {
       log("session.select failed: \(error)")
