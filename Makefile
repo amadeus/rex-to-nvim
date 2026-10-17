@@ -1,7 +1,7 @@
 APP_NAME ?= Neovim
 BUNDLE_ID ?= local.rex-to-nvim
 VERSION ?= 0.1.0
-INSTALL_DIR ?= $(HOME)/Applications
+INSTALL_DIR ?= /Applications
 DEVICONS ?= $(HOME)/.local/share/nvim/lazy/nvim-web-devicons
 
 BUILD := build
@@ -19,7 +19,7 @@ $(BUILD)/rex-to-nvim: Sources/main.swift
 	swiftc -O -target arm64-apple-macos13.0 -o $@ $<
 
 # Writes both Info.plist and types.json.
-$(BUILD)/Info.plist: tools/gen-plist.swift data/devicons.json data/include.txt data/exclude.txt
+$(BUILD)/Info.plist: tools/gen-plist.swift data/devicons.json data/extensions.txt
 	swift tools/gen-plist.swift data $(BUILD) "$(APP_NAME)" $(BUNDLE_ID) $(VERSION)
 
 $(BUILD)/gen-icons: tools/gen-icons.swift
@@ -46,8 +46,10 @@ app: $(BUILD)/rex-to-nvim $(BUILD)/Info.plist $(BUILD)/icons/.stamp
 install: app
 	rm -rf "$(INSTALLED)"
 	ditto "$(APP)" "$(INSTALLED)"
-	# macOS registers the copy in build/ on its own; only the installed one should handle files.
+	# macOS registers (and re-registers) the copy in build/ on its own; remove it so
+	# only the installed one handles files.
 	-$(LSREGISTER) -u "$(APP)"
+	rm -rf "$(APP)"
 	$(LSREGISTER) -f "$(INSTALLED)"
 	@echo "Installed $(INSTALLED)"
 

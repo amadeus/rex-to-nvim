@@ -1,0 +1,60 @@
+# The file extensions the app claims: code only. One or more per line;
+# lines starting with # are comments.
+#
+# Icons come from data/devicons.json. An extension macOS already knows uses
+# its system type; others get a type declared by the app. Extensions macOS
+# maps to a catch-all type (plain text, data, generic source code) are
+# refused by the build, since claiming those would claim every text file.
+
+# C family, systems, native
+c h cc cpp cxx c++ cp hh hpp hxx ccm cppm cxxm ixx mpp
+cu cuh m mm
+rs go zig odin d v nim mojo swift
+asm s
+
+# JVM and .NET
+java kt kts scala sc sbt gradle
+cs csproj cshtml razor sln slnx xaml
+fs fsi fsx vala
+
+# Scripting
+py pyi pyw pyx pxd pxi
+rb rake gemspec
+pl pm t php
+lua luau r rmd jl tcl awk applescript
+
+# Shells
+sh bash zsh fish ksh csh nu bat ps1 psd1 psm1
+
+# Functional
+hs lhs ml mli elm clj cljs cljc el fnl rkt scm sml
+erl hrl ex eex heex leex gleam
+
+# Web
+js mjs cjs jsx ts mts cts tsx coffee cson res resi
+html htm css scss sass less styl
+vue svelte astro
+
+# Templates
+erb ejs epp haml hbs liquid mustache slim twig templ tmpl typoscript
+
+# Data and config used in code
+json json5 jsonc jsonl webmanifest ipynb tsconfig
+yaml yml toml cfg ini conf env
+xml xslt xul ui qrc qss rasi tmux
+
+# Build and infrastructure
+makefile mk gnumakefile cmake dockerfile dockerignore
+bazel bzl nix tf tfvars bicep bicepparam ebuild pp prisma pro
+
+# Shaders
+glsl frag vert vsh geom wgsl
+
+# Docs written as code
+md markdown mdx tex typ svg
+
+# Everything else
+ada adb ads cbl cob cpy f90 dart cr sol scad hx qml blp cue
+sql graphql gql cfc cfm ino
+gd tres tscn feature http hurl gv query diff patch gpr
+sv svh vhd vhdl vim

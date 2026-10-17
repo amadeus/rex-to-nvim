@@ -1,5 +1,6 @@
-// Builds the app's Info.plist from data/devicons.json, deciding which
-// extensions the app claims and which system type (UTI) each one maps to.
+// Builds the app's Info.plist from data/extensions.txt (what to claim) and
+// data/devicons.json (names and icons), mapping each extension to a system
+// type (UTI) or declaring one.
 //
 // Usage: swift tools/gen-plist.swift <data-dir> <out-dir> <app-name> <bundle-id> <version>
 //
@@ -36,39 +37,50 @@ let dataDir = URL(fileURLWithPath: args[1])
 let outDir = URL(fileURLWithPath: args[2])
 let appName = args[3], bundleID = args[4], version = args[5]
 
-func readList(_ name: String) -> Set<String> {
-  let text = (try? String(contentsOf: dataDir.appendingPathComponent(name), encoding: .utf8)) ?? ""
-  return Set(text.split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) }
-    .filter { !$0.isEmpty && !$0.hasPrefix("#") }.map { $0.lowercased() })
+func fail(_ message: String) -> Never {
+  FileHandle.standardError.write("gen-plist: \(message)\n".data(using: .utf8)!)
+  exit(1)
 }
 
-let devicons = try JSONDecoder().decode([Devicon].self, from: Data(contentsOf: dataDir.appendingPathComponent("devicons.json")))
-let include = readList("include.txt"), exclude = readList("exclude.txt")
-let validExt = try Regex("^[a-z0-9_+#-]+$")
+/// data/extensions.txt: whitespace-separated extensions, # comments.
+let extensions: [String] = {
+  let text = (try? String(contentsOf: dataDir.appendingPathComponent("extensions.txt"), encoding: .utf8)) ?? ""
+  return text.split(separator: "\n")
+    .map { $0.split(separator: "#", maxSplits: 1, omittingEmptySubsequences: false)[0] }
+    .flatMap { $0.split(whereSeparator: \.isWhitespace).map { $0.lowercased() } }
+}()
 
-// Ordered by first appearance so output is stable.
+let devicons = try JSONDecoder().decode([Devicon].self, from: Data(contentsOf: dataDir.appendingPathComponent("devicons.json")))
+let deviconByExt = Dictionary(devicons.map { ($0.ext.lowercased(), $0) }, uniquingKeysWith: { first, _ in first })
+/// devicons' fallback, for extensions it has no icon for.
+let defaultIcon = Devicon(ext: "", name: "Source", glyph: "\u{E64E}", color: "#6D8086", filetype: nil)
+let validExt = try Regex("^[a-z0-9_+-]+$")
+
+/// Types so general that claiming them claims every file conforming to them.
+let catchAllTypes: [UTType] = [.plainText, .text, .data, .content, .item, .sourceCode, .script]
+
+// Ordered as listed, so output is stable.
 var docTypes: [DocType] = []
 var indexByUTI: [String: Int] = [:]
 var seenExts: Set<String> = []
 
-for icon in devicons.sorted(by: { $0.ext.lowercased() < $1.ext.lowercased() }) {
-  let ext = icon.ext.lowercased()
-  // Compound extensions (test.ts, d.ts) can't be told apart by LaunchServices.
-  guard (try? validExt.wholeMatch(in: ext)) != nil, !seenExts.contains(ext), !exclude.contains(ext) else { continue }
+for ext in extensions {
+  guard (try? validExt.wholeMatch(in: ext)) != nil else { fail("invalid extension \"\(ext)\" in extensions.txt") }
+  guard !seenExts.contains(ext) else { fail("\(ext) is listed twice in extensions.txt") }
+  let icon = deviconByExt[ext] ?? defaultIcon
 
-  let safe = ext.replacingOccurrences(of: "+", with: "plus")
-    .replacingOccurrences(of: "#", with: "sharp")
-    .replacingOccurrences(of: "_", with: "-")
+  let safe = ext.replacingOccurrences(of: "+", with: "plus").replacingOccurrences(of: "_", with: "-")
   let uti: String
   let imported: Bool
   // Types declared by an installed copy of this app (under any bundle ID) don't
   // count as known to macOS, or rebuilding would stop declaring them.
   if let type = UTType(filenameExtension: ext), !type.isDynamic, !type.identifier.hasSuffix(".ext.\(safe)") {
-    guard include.contains(ext) || type.conforms(to: .text) else { continue }
+    guard !catchAllTypes.contains(type) else {
+      fail("macOS maps .\(ext) to the catch-all type \(type.identifier); remove it from extensions.txt")
+    }
     uti = type.identifier
     imported = false
   } else {
-    guard include.contains(ext) || icon.filetype != nil else { continue }
     uti = "\(bundleID).ext.\(safe)"
     imported = true
   }
@@ -86,7 +98,6 @@ for icon in devicons.sorted(by: { $0.ext.lowercased() < $1.ext.lowercased() }) {
 // A system type shared by several extensions takes its name and icon from the
 // type's preferred extension (public.toml claims cfg and toml; use toml's), and
 // lists that extension first so the icon is labeled with it.
-let deviconByExt = Dictionary(devicons.map { ($0.ext.lowercased(), $0) }, uniquingKeysWith: { first, _ in first })
 for (index, type) in docTypes.enumerated() where !type.imported && type.exts.count > 1 {
   guard let preferred = UTType(type.uti)?.preferredFilenameExtension, type.exts.contains(preferred),
         let icon = deviconByExt[preferred] else { continue }
@@ -95,11 +106,16 @@ for (index, type) in docTypes.enumerated() where !type.imported && type.exts.cou
 }
 
 // Icons are rendered by gen-icons.swift from types.json.
+//
+// The app owns the types it declares, so they open in it without any setup.
+// For system types other apps also handle (.ts, .json, .swift…) it's only an
+// alternate: listed in Open With, but never picked as the default by macOS on
+// its own. The user makes it the default for those in Finder.
 let documentTypes: [[String: Any]] = docTypes.map { type in
   [
     "CFBundleTypeName": type.name,
     "CFBundleTypeRole": "Editor",
-    "LSHandlerRank": "Default",
+    "LSHandlerRank": type.imported ? "Owner" : "Alternate",
     "LSItemContentTypes": [type.uti],
     "CFBundleTypeIconFile": type.icon,
   ]

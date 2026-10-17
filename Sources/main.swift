@@ -1,8 +1,8 @@
 // rex-to-nvim: receives "open file" events from Finder and LaunchServices,
 // forwards them to Rex as a new session running Neovim, then exits.
 //
-// The app never shows a Dock icon (LSUIElement) and quits as soon as the
-// files have been handed off.
+// The app never shows a Dock icon (LSUIElement) or a dialog, and quits as
+// soon as the files have been handed off. Failures go to the log.
 
 import AppKit
 
@@ -394,17 +394,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
   func application(_ application: NSApplication, open urls: [URL]) {
     receivedFiles = true
+    // Web links can arrive if this app ever becomes the default browser; pass them on.
+    let links = urls.filter { !$0.isFileURL }
+    if !links.isEmpty { handOff(links) }
+    let files = urls.filter(\.isFileURL)
+    guard !files.isEmpty else {
+      if pending == 0 { NSApp.terminate(nil) }
+      return
+    }
     pending += 1
     DispatchQueue.global(qos: .userInitiated).async {
-      var failure: Error?
       do {
-        try Forwarder(config: .load()).forward(urls)
+        try Forwarder(config: .load()).forward(files)
       } catch {
-        log("error: \(error)")
-        failure = error
+        log("error opening \(files.map(\.path)): \(error)")
       }
       DispatchQueue.main.async {
-        if let failure { self.showError(failure, urls: urls) }
         self.pending -= 1
         if self.pending == 0 { NSApp.terminate(nil) }
       }
@@ -412,22 +417,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
   }
 
   func applicationDidFinishLaunching(_ notification: Notification) {
-    // Launched without any files (e.g. double-clicked in Finder): nothing to do.
-    DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
+    // Files opened at launch arrive before this. Without any, the app was opened on
+    // its own (e.g. double-clicked in Finder): nothing to do.
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
       if !self.receivedFiles { NSApp.terminate(nil) }
     }
   }
 
-  private func showError(_ error: Error, urls: [URL]) {
-    if #available(macOS 14, *) {
-      NSApp.activate()
-    } else {
-      NSApp.activate(ignoringOtherApps: true)
+  /// Open non-file URLs in another app that handles them, since Rex can't.
+  private func handOff(_ links: [URL]) {
+    let me = Bundle.main.bundleURL.standardizedFileURL
+    for link in links {
+      guard let other = NSWorkspace.shared.urlsForApplications(toOpen: link).first(where: { $0.standardizedFileURL != me }) else {
+        log("no other app can open \(link)")
+        continue
+      }
+      log("handing \(link) to \(other.lastPathComponent)")
+      NSWorkspace.shared.open([link], withApplicationAt: other, configuration: NSWorkspace.OpenConfiguration())
     }
-    let alert = NSAlert()
-    alert.messageText = "Couldn't open \(urls.map(\.lastPathComponent).joined(separator: ", ")) in Rex"
-    alert.informativeText = String(describing: error)
-    alert.runModal()
   }
 }
 
