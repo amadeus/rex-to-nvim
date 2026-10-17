@@ -1,0 +1,12 @@
+# Extensions to never claim, even if the automatic rules would.
+
+# Neovim maps these to a filetype, but in practice they're binary.
+lib
+mo
+msf
+
+# Text, but not something you'd want to open in an editor.
+ics
+m3u
+m3u8
+obj
