@@ -9,8 +9,16 @@ import AppKit
 let rexBundleID = "com.superlogical.rex"
 let home = FileManager.default.homeDirectoryForCurrentUser
 
+/// Append to ~/Library/Logs/rex-to-nvim.log. Past 1 MB it's moved to
+/// rex-to-nvim.1.log (replacing the previous one), so it never grows unbounded.
 func log(_ message: String) {
+  let fm = FileManager.default
   let url = home.appendingPathComponent("Library/Logs/rex-to-nvim.log")
+  if let size = (try? fm.attributesOfItem(atPath: url.path))?[.size] as? Int, size > 1_000_000 {
+    let previous = url.deletingLastPathComponent().appendingPathComponent("rex-to-nvim.1.log")
+    try? fm.removeItem(at: previous)
+    try? fm.moveItem(at: url, to: previous)
+  }
   let line = "\(ISO8601DateFormatter().string(from: Date())) \(message)\n"
   if let handle = try? FileHandle(forWritingTo: url) {
     handle.seekToEndOfFile()
@@ -145,19 +153,59 @@ struct NvimInstance {
   let cwd: URL
 }
 
-/// Every Neovim's editor process listens on $TMPDIR/nvim.$USER/<random>/nvim.<pid>.0.
-/// (Neovim 0.10+ runs the editor in a child of the UI process Rex sees.) Sockets of
-/// exited Neovims linger, so callers check the process is still alive.
-func nvimSockets() -> [(pid: pid_t, path: String)] {
+/// A Neovim editor process with an RPC socket. Neovim 0.10+ runs the editor in a
+/// child of the UI process that Rex sees in the foreground.
+struct NvimProcess {
+  let pid: pid_t
+  let binary: String
+  let socket: String
+  let environment: [String: String]
+}
+
+/// Every running Neovim that has an RPC socket.
+func nvimProcesses() -> [NvimProcess] {
+  allProcessIDs().compactMap { pid in
+    guard let binary = processPath(pid), (binary as NSString).lastPathComponent == "nvim",
+          let (arguments, environment) = processArgumentsAndEnvironment(pid),
+          let socket = nvimSocket(pid: pid, arguments: arguments, environment: environment) else { return nil }
+    return NvimProcess(pid: pid, binary: binary, socket: socket, environment: environment)
+  }
+}
+
+/// Neovim listens on `--listen <path>` if given, otherwise on nvim.<pid>.0 in its
+/// run directory: $XDG_RUNTIME_DIR if set, else $TMPDIR/nvim.$USER/<random>/.
+/// The UI process has no socket of its own.
+func nvimSocket(pid: pid_t, arguments: [String], environment: [String: String]) -> String? {
   let fm = FileManager.default
-  let base = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("nvim.\(NSUserName())")
-  return ((try? fm.contentsOfDirectory(atPath: base.path)) ?? []).flatMap { dir in
-    let dirURL = base.appendingPathComponent(dir)
-    return ((try? fm.contentsOfDirectory(atPath: dirURL.path)) ?? []).compactMap { file -> (pid_t, String)? in
-      guard file.hasPrefix("nvim."), file.hasSuffix(".0"), let pid = pid_t(file.dropFirst(5).dropLast(2)) else { return nil }
-      return (pid, dirURL.appendingPathComponent(file).path)
+  if let index = arguments.firstIndex(of: "--listen"), index + 1 < arguments.count {
+    let address = arguments[index + 1]
+    return address.hasPrefix("/") && fm.fileExists(atPath: address) ? address : nil
+  }
+  let name = "nvim.\(pid).0"
+  var bases: [String] = []
+  for base in [environment["XDG_RUNTIME_DIR"], environment["TMPDIR"], NSTemporaryDirectory()].compactMap({ $0 })
+  where !bases.contains(base) {
+    bases.append(base)
+  }
+  for base in bases.map(URL.init(fileURLWithPath:)) {
+    let direct = base.appendingPathComponent(name)
+    if fm.fileExists(atPath: direct.path) { return direct.path }
+    let userDir = base.appendingPathComponent("nvim.\(NSUserName())")
+    for random in (try? fm.contentsOfDirectory(atPath: userDir.path)) ?? [] {
+      let candidate = userDir.appendingPathComponent(random).appendingPathComponent(name)
+      if fm.fileExists(atPath: candidate.path) { return candidate.path }
     }
   }
+  return nil
+}
+
+func allProcessIDs() -> [pid_t] {
+  let count = proc_listallpids(nil, 0)
+  guard count > 0 else { return [] }
+  // Leave room for processes started since counting.
+  var pids = [pid_t](repeating: 0, count: Int(count) + 64)
+  let found = proc_listallpids(&pids, Int32(pids.count * MemoryLayout<pid_t>.size))
+  return Array(pids.prefix(Int(max(found, 0))))
 }
 
 /// A process's current working directory, or nil if it isn't running.
@@ -175,23 +223,38 @@ func processPath(_ pid: pid_t) -> String? {
   return String(cString: buffer)
 }
 
-/// A process's environment, from KERN_PROCARGS2: argc, the executable path, then
-/// argv and environ as NUL-terminated strings.
-func processEnvironment(_ pid: pid_t) -> [String: String] {
+/// A process's arguments (without argv[0]) and environment, from KERN_PROCARGS2:
+/// argc, the executable path and its NUL padding, then argv and environ as
+/// NUL-terminated strings. Only the user's own processes are readable.
+func processArgumentsAndEnvironment(_ pid: pid_t) -> (arguments: [String], environment: [String: String])? {
   var mib: [Int32] = [CTL_KERN, KERN_PROCARGS2, pid]
   var size = 0
-  guard sysctl(&mib, 3, nil, &size, nil, 0) == 0, size > MemoryLayout<Int32>.size else { return [:] }
+  guard sysctl(&mib, 3, nil, &size, nil, 0) == 0, size > MemoryLayout<Int32>.size else { return nil }
   var buffer = [UInt8](repeating: 0, count: size)
-  guard sysctl(&mib, 3, &buffer, &size, nil, 0) == 0 else { return [:] }
+  guard sysctl(&mib, 3, &buffer, &size, nil, 0) == 0 else { return nil }
   let argc = Int(buffer.withUnsafeBytes { $0.load(as: Int32.self) })
-  let strings = buffer[MemoryLayout<Int32>.size..<size].split(separator: 0).map { String(decoding: $0, as: UTF8.self) }
-  // strings[0] is the executable path; argv follows, then the environment.
+
+  var index = MemoryLayout<Int32>.size
+  func nextString() -> String? {
+    guard index < size else { return nil }
+    let start = index
+    while index < size && buffer[index] != 0 { index += 1 }
+    defer { index += 1 }
+    return String(decoding: buffer[start..<index], as: UTF8.self)
+  }
+  _ = nextString()  // executable path
+  while index < size && buffer[index] == 0 { index += 1 }
+  var argv: [String] = []
+  for _ in 0..<argc {
+    guard let argument = nextString() else { break }
+    argv.append(argument)
+  }
   var environment: [String: String] = [:]
-  for entry in strings.dropFirst(1 + argc) {
+  while let entry = nextString(), !entry.isEmpty {
     guard let equals = entry.firstIndex(of: "=") else { continue }
     environment[String(entry[..<equals])] = String(entry[entry.index(after: equals)...])
   }
-  return environment
+  return (Array(argv.dropFirst()), environment)
 }
 
 /// Quote a string as a Vim single-quoted string literal.
@@ -307,22 +370,20 @@ struct Forwarder {
   /// `repo`, those at its root first.
   ///
   /// Found from the processes themselves rather than by asking Rex about every
-  /// pane: each Neovim's socket names its pid, the process's cwd says where it's
-  /// working, and the REX_SESSION and REX_BLOCK it inherited from its shell say
-  /// which pane it's in. Rex is only asked to confirm a match.
+  /// pane: the process's cwd says where it's working, and the REX_SESSION and
+  /// REX_BLOCK it inherited from its shell say which pane it's in. Rex is only
+  /// asked to confirm a match.
   private func runningNvims(in repo: URL) -> [NvimInstance] {
     var found: [NvimInstance] = []
-    for socket in nvimSockets() {
-      guard let cwd = processCwd(socket.pid)?.resolvingSymlinksInPath(), gitRoot(of: cwd) == repo else { continue }
-      let environment = processEnvironment(socket.pid)
-      guard let session = environment["REX_SESSION"], let block = environment["REX_BLOCK"],
-            let binary = processPath(socket.pid) else { continue }
+    for nvim in nvimProcesses() {
+      guard let cwd = processCwd(nvim.pid)?.resolvingSymlinksInPath(), gitRoot(of: cwd) == repo,
+            let session = nvim.environment["REX_SESSION"], let block = nvim.environment["REX_BLOCK"] else { continue }
       // It must be what the pane shows, not suspended or nested inside another program.
       guard let foreground = rexJSON(["block", "call", "-s", session, "-b", block, "process"])?["foreground"] as? [String: Any],
             let uiPID = (foreground["pid"] as? Int).map(pid_t.init),
-            uiPID == socket.pid || parentPID(of: socket.pid) == uiPID else { continue }
-      found.append(NvimInstance(session: session, block: block, binary: URL(fileURLWithPath: binary),
-                                server: socket.path, cwd: cwd))
+            uiPID == nvim.pid || parentPID(of: nvim.pid) == uiPID else { continue }
+      found.append(NvimInstance(session: session, block: block, binary: URL(fileURLWithPath: nvim.binary),
+                                server: nvim.socket, cwd: cwd))
     }
     return found.filter { $0.cwd == repo } + found.filter { $0.cwd != repo }
   }

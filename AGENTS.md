@@ -6,7 +6,7 @@ and the traps found so far.
 
 ## What this is
 
-A background-only macOS app (shown as **Neovim**, bundle ID `local.rex-to-nvim`,
+A background-only macOS app (shown as **Neovim**, bundle ID `io.github.amadeus.rex-to-nvim`,
 executable `rex-to-nvim`) that registers as a handler for the code file types
 listed in `data/extensions.txt`.
 When macOS asks it to open files, it hands them to Rex and quits:
@@ -29,7 +29,7 @@ shows a dialog; failures are logged. Opening it on its own does nothing.
 | `tools/export-devicons.lua` | Refreshes `data/devicons.json` from nvim-web-devicons (`make devicons`). |
 | `data/extensions.txt` | The allowlist of code extensions the app claims. Code only: no plain text, logs, data, media. |
 | `assets/fonts/` | Symbols Nerd Font (MIT) for document icon glyphs. |
-| `design/` | Icon explorations, kept for reference. `all-doc-icons.png` is a contact sheet and may be stale. |
+| `assets/readme/preview.png` | README image, rendered from `build/icons`. Regenerate it if the icon design changes. |
 
 ## Build and install
 
@@ -61,9 +61,9 @@ There are no tests. Verify behavior by running the installed app (below).
 - Inspect results with `rex capture -s <session> -b <block> --trim` and
   `rex block call -s <session> -b <block> process`. Kill test sessions with
   `rex kill <session>` when done.
-- Use a scratch git repo for tests. The user's own Neovim (often hosting the
-  agent in a `:terminal`) has its cwd in this repo, so opening files from this
-  repo will open tabs in it.
+- Use a scratch git repo for tests. If a Neovim is running in this repo (for
+  example one hosting you in a `:terminal`), opening files from this repo
+  opens tabs in it.
 - To see icons as Finder does, render `NSWorkspace.shared.icon(forFile:)` to
   a PNG.
 
@@ -112,7 +112,7 @@ There are no tests. Verify behavior by running the installed app (below).
 **Rex**
 - `rex new -- cmd` makes `cmd` the session's only process, so the session dies
   when it exits. The app instead starts a shell session and types the command
-  with `rex send` + `rex send-key enter`. Quoting follows the user's login
+  with `rex send`, ending in `\r` to press Enter. Quoting follows the login
   shell (fish quoting differs from POSIX).
 - `rex block ls --json` needs `-s SESSION`; iterate `rex ls --json` sessions.
 - `rex block call -s S -b B process` → `.foreground` gives `name`, `pid`,
@@ -120,7 +120,7 @@ There are no tests. Verify behavior by running the installed app (below).
 - Several Rex apps can be connected (e.g. another Mac over Tailscale). Pick the
   `app` client over the unix transport whose pid matches the running
   `com.superlogical.rex` app.
-- Don't name sessions; the user prefers Rex's own names.
+- New sessions are left unnamed so Rex names them; don't add labels.
 
 **Neovim**
 - Neovim 0.10+ is two processes. Rex reports the UI process as a pane's
@@ -128,12 +128,16 @@ There are no tests. Verify behavior by running the installed app (below).
   `$TMPDIR/nvim.$USER/<random>/nvim.<child pid>.0`. Relate them by parent pid
   (`sysctl` `KERN_PROC_PID`); `pgrep -P` is unreliable from sandboxes. Sockets
   of exited Neovims linger, so check the pid is alive.
-- Discovery starts from those sockets, not from Rex: the server process's cwd
-  (`proc_pidinfo` `PROC_PIDVNODEPATHINFO`, which follows `:cd`), its binary
-  (`proc_pidpath`), and its environment (`sysctl` `KERN_PROCARGS2`), where
-  `REX_SESSION`/`REX_BLOCK` inherited from the Rex shell name its pane. Rex is
-  asked once per matching candidate, to confirm it's the pane's foreground.
-  This replaced one `rex` call per pane in every session (~200 ms).
+- Discovery starts from processes, not from Rex: every process whose binary
+  (`proc_pidpath`) is named `nvim`, with its arguments and environment from
+  `sysctl` `KERN_PROCARGS2`. Its socket is `--listen <path>` if given, else
+  `nvim.<pid>.0` directly in `$XDG_RUNTIME_DIR` or under
+  `$TMPDIR/nvim.$USER/<random>/` (checked using the process's own env). UI
+  processes have no socket and drop out. The cwd (`proc_pidinfo`
+  `PROC_PIDVNODEPATHINFO`, which follows `:cd`) is matched against the repo,
+  and `REX_SESSION`/`REX_BLOCK` inherited from the Rex shell name the pane.
+  Rex is asked once per matching candidate, to confirm it's the pane's
+  foreground. This replaced one `rex` call per pane in every session (~200 ms).
 - Files are opened via `luaeval('vim.schedule(…)')`, so `--remote-expr` returns
   before Neovim runs filetype plugins and LSP for them (up to ~190 ms). Errors
   inside Neovim after that aren't reported back.

@@ -1,60 +1,68 @@
 # rex-to-nvim
 
-A tiny macOS app that opens code files in Neovim inside Rex. It registers as a
-handler for ~220 code file types, so you can pick it from Finder's **Open With**
-menu or make it the default app with **Get Info → Open with → Change All…**
+A tiny macOS app that opens code files in Neovim inside Rex.
+Double-click a `.rs` file in Finder and it opens in Neovim: in the Neovim
+you already have running for that git repository if there is one, otherwise in
+a new Rex session at the repository root.
 
-It never stays running and never shows a window or dialog: it has no Dock
-icon, hands each file off to Rex, and quits. Problems are written to the log.
+![The app icon and some of its file icons](assets/readme/preview.png)
 
-## What happens when you open a file
+The app shows up in Finder as **Neovim**. It handles ~220 code file types,
+gives each one an icon, and never stays running: it has no Dock icon and no
+windows, hands each file off to Rex, and quits.
 
-1. Finds the working directory: the root of the file's git repository, or
-   the file's own folder if it isn't in one.
-2. If the file is in a git repository and a Rex pane is already running
-   Neovim in that repository, it opens the file there (`:tab drop`, which
-   switches to the file's tab if it's already open) and focuses that pane.
-   Neovims at the repository root are preferred over ones in a subfolder.
-3. Otherwise it creates a Rex session there (`rex new`) and types
-   `nvim -p <files>` into its shell, so quitting Neovim leaves you at a prompt
-   instead of closing the session.
-4. Switches this Mac's Rex app to the session and brings Rex to the front.
+rex-to-nvim is not affiliated with the Neovim project.
 
-To find running Neovims, it looks at the processes behind Neovim's RPC sockets:
-each one's working directory, and the `REX_SESSION` and `REX_BLOCK` it inherited
-from its Rex shell. Rex is only asked to confirm that the Neovim is what its pane
-shows. It then asks that Neovim to open the files over the socket
-(`nvim --server … --remote-expr`), without waiting for them to finish loading.
-If the Neovim doesn't answer within 3 seconds, it falls back to a new session.
+## Requirements
 
-Opening several files from the same repository at once puts them in one
-session, as Neovim tabs.
+- An Apple Silicon Mac running macOS 13 or later
+- Rex, with its app running
+- [Neovim](https://neovim.io), on the `PATH` of your login shell
+- The Xcode Command Line Tools (`xcode-select --install`) to build it
 
-## Making it the default app
+## Install
 
-- **File types only this app knows** (`.rs`, `.go`, `.vue`, `.astro`, …): it
-  declares them itself and owns them, so they open in Neovim right after
-  install.
-- **File types other apps also handle** (`.ts`, `.json`, `.md`, `.swift`,
-  `.svg`, …): it only registers as an alternate. It appears in Open With, but
-  macOS keeps them on the other app. To use it for one, select a file of that
-  type in Finder, then **Get Info → Open with: Neovim → Change All…**
+```sh
+git clone https://github.com/amadeus/rex-to-nvim
+cd rex-to-nvim
+make install
+```
+
+This builds `Neovim.app` and installs it to `/Applications` (set
+`INSTALL_DIR=…` to change that). `make uninstall` removes it and unregisters
+its file types.
+
+There's no prebuilt download; the app is built and signed locally, so macOS
+doesn't quarantine it.
+
+## Using it
+
+**File types only this app knows** (`.rs`, `.go`, `.vue`, `.astro`, …) open in
+it as soon as it's installed: it declares those types itself.
+
+**File types other apps also handle** (`.ts`, `.json`, `.md`, `.swift`, `.svg`,
+…) stay with their current app. The app only lists itself as an alternative,
+so it appears in **Open With** but doesn't take them over. To switch one,
+select a file of that type in Finder, then **Get Info → Open with: Neovim →
+Change All…**
 
 Opening the app on its own does nothing.
 
-## Build and install
+## What happens when you open a file
 
-Requires the Xcode Command Line Tools and Rex.
+1. The working directory is the root of the file's git repository, or the
+   file's own folder if it isn't in one.
+2. If the file is in a git repository and a Rex pane is already running Neovim
+   in that repository, the file opens there (`:tab drop`, which switches to it
+   if it's already open), and Rex switches to that pane. A Neovim at the
+   repository root is preferred over one in a subfolder.
+3. Otherwise it creates a Rex session in the working directory and types
+   `nvim -p <files>` into its shell, so quitting Neovim leaves you at a prompt
+   instead of closing the session.
+4. Rex comes to the front.
 
-```sh
-make install     # builds build/Neovim.app and installs it to /Applications
-make uninstall   # removes it and unregisters its file types
-```
-
-`APP_NAME`, `BUNDLE_ID` and `INSTALL_DIR` can be overridden, e.g.
-`make install APP_NAME="Neovim (Rex)"`.
-
-Activity and errors are logged to `~/Library/Logs/rex-to-nvim.log`.
+Several files from the same repository opened at once go to one Neovim, as
+tabs. A forward takes about a third of a second.
 
 ## Configuration
 
@@ -63,65 +71,74 @@ Optional, in `~/.config/rex-to-nvim/config.json`:
 ```json
 {
   "command": ["nvim", "-p", "{files}"],
-  "cwd": "gitRoot",
-  "keepShell": true,
-  "client": "auto",
-  "rex": "/path/to/rex"
+  "reuseNvim": true
 }
 ```
 
 | Key | Default | Meaning |
 | --- | --- | --- |
-| `command` | `["nvim", "-p", "{files}"]` | What to run. `{files}` expands to every opened path, `{file}` to the first. |
-| `cwd` | `"gitRoot"` | `"gitRoot"` or `"parent"` (always the file's folder). |
+| `command` | `["nvim", "-p", "{files}"]` | What a new session runs. `{files}` expands to every opened path, `{file}` to the first. |
+| `cwd` | `"gitRoot"` | `"gitRoot"`, or `"parent"` to always use the file's folder. |
 | `keepShell` | `true` | Run the command from a shell. `false` runs it directly, so quitting it ends the session. |
 | `reuseNvim` | `true` | Open files from a git repository in a Neovim already running in it. |
 | `openCommand` | `"tab drop"` | The Ex command a reused Neovim opens each file with, e.g. `"drop"` or `"edit"`. |
 | `client` | `"auto"` | Which Rex app to switch to the session: `"auto"` (this Mac), `"none"`, or a client label or ID from `rex client ls`. |
 | `rex` | found automatically | Path to the `rex` binary. By default it's looked up on `PATH`, then in the newest Rex server install. |
 
+## Privacy
+
+To find a running Neovim, the app reads the working directory and environment
+of your own `nvim` processes. It only uses `REX_SESSION`, `REX_BLOCK`,
+`XDG_RUNTIME_DIR` and `TMPDIR` from the environment, and stores nothing.
+The log, `~/Library/Logs/rex-to-nvim.log`, records which files were opened
+where. It's capped at 1 MB, plus one previous file.
+
+## Troubleshooting
+
+- **Nothing happens when I open a file.** Check
+  `~/Library/Logs/rex-to-nvim.log`; the app never shows errors on screen.
+- **Files don't open in my running Neovim.** It has to be the foreground
+  program of a Rex pane, started from that pane's shell, with its working
+  directory inside the file's repository.
+- **Old icons in Finder.** macOS caches icons aggressively. Run
+  `killall iconservicesagent Finder`, or log out and back in.
+- **Neovim is listed for `.ts` and `.mts` videos.** macOS identifies those
+  extensions as MPEG-2 video, so claiming TypeScript claims them too. It doesn't
+  become their default unless you make it.
+
 ## Which file types it claims
 
-Exactly the code extensions listed in `data/extensions.txt`. Edit that file and
-run `make install` to add or remove one. `tools/gen-plist.swift` maps each to
-the type macOS already uses for it, or declares one (conforming to
-`public.source-code`) if macOS doesn't know it. The build refuses extensions
-macOS maps to a catch-all type like plain text, since claiming that would claim
-every text file.
+Exactly the code extensions in `data/extensions.txt`. Edit that file and run
+`make install` to add or remove one. Each maps to the type macOS already uses
+for it, or the app declares one if macOS doesn't know it. The build refuses
+extensions macOS maps to a catch-all type like plain text, since claiming
+those would claim every text file.
 
-Icons and names come from [nvim-web-devicons](https://github.com/nvim-tree/nvim-web-devicons),
-snapshotted in `data/devicons.json`. Note that macOS treats `.ts` as MPEG-2
-video and `.svg` as an image, so claiming them also lists Neovim for those.
-
-To refresh the snapshot from your installed plugin:
+Names, glyphs and colors come from
+[nvim-web-devicons](https://github.com/nvim-tree/nvim-web-devicons), snapshotted
+in `data/devicons.json`. To refresh it from your installed plugin:
 
 ```sh
-make devicons
+make devicons   # or: make devicons DEVICONS=/path/to/nvim-web-devicons
 ```
 
-## Icons
-
-`tools/gen-icons.swift` renders every icon at build time:
-
-- **App icon:** the Neovim mark in white on a blue tile.
-- **Document icons:** one per file type. Each is a white page with the type's
-  devicons glyph and, centered beneath it, its extension, both in the type's
-  color. Below 64px the label is dropped and the glyph enlarged so it stays
-  legible. Colors too pale to read on white are darkened.
-
-Glyphs come from Symbols Nerd Font (`assets/fonts`, MIT licensed).
-
-macOS caches icons aggressively. If changed icons don't show up after
-`make install`, run `killall iconservicesagent Finder`. If that's not enough,
-log out and back in.
-
-## Layout
+## Development
 
 ```
-Sources/main.swift          the app: receives open events, drives the rex CLI
-tools/gen-plist.swift       devicons.json → Info.plist (+ build/types.json)
+Sources/main.swift          the app: receives open events, finds Neovims, drives the rex CLI
+tools/gen-plist.swift       extensions.txt + devicons.json → Info.plist (+ build/types.json)
 tools/gen-icons.swift       types.json → AppIcon.icns + one .icns per file type
 tools/export-devicons.lua   nvim-web-devicons → data/devicons.json
 data/                       extensions.txt (what to claim), devicons snapshot
 assets/fonts/               Symbols Nerd Font, for the document icon glyphs
 ```
+
+`APP_NAME`, `BUNDLE_ID` and `INSTALL_DIR` can be overridden on the `make`
+command line. [AGENTS.md](AGENTS.md) has notes on testing and on the macOS
+quirks this project works around.
+
+## License
+
+MIT; see [LICENSE](LICENSE). Bundled and derived third-party works (the Neovim
+logo, nvim-web-devicons, Symbols Nerd Font) are covered in
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

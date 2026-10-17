@@ -1,5 +1,5 @@
 APP_NAME ?= Neovim
-BUNDLE_ID ?= local.rex-to-nvim
+BUNDLE_ID ?= io.github.amadeus.rex-to-nvim
 VERSION ?= 0.1.0
 INSTALL_DIR ?= /Applications
 DEVICONS ?= $(HOME)/.local/share/nvim/lazy/nvim-web-devicons
