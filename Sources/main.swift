@@ -1,4 +1,4 @@
-// ft-forwarder: receives "open file" events from Finder and LaunchServices,
+// rex-to-nvim: receives "open file" events from Finder and LaunchServices,
 // forwards them to Rex as a new session running Neovim, then exits.
 //
 // The app never shows a Dock icon (LSUIElement) and quits as soon as the
@@ -10,7 +10,7 @@ let rexBundleID = "com.superlogical.rex"
 let home = FileManager.default.homeDirectoryForCurrentUser
 
 func log(_ message: String) {
-  let url = home.appendingPathComponent("Library/Logs/ft-forwarder.log")
+  let url = home.appendingPathComponent("Library/Logs/rex-to-nvim.log")
   let line = "\(ISO8601DateFormatter().string(from: Date())) \(message)\n"
   if let handle = try? FileHandle(forWritingTo: url) {
     handle.seekToEndOfFile()
@@ -28,7 +28,7 @@ struct ForwardError: Error, CustomStringConvertible {
 
 // MARK: - Config
 
-/// Optional overrides, read from ~/.config/ft-forwarder/config.json.
+/// Optional overrides, read from ~/.config/rex-to-nvim/config.json.
 struct Config: Decodable {
   /// Path to the rex binary. Defaults to PATH, then the newest Rex server install.
   var rex: String?
@@ -48,7 +48,7 @@ struct Config: Decodable {
   var openCommand: String?
 
   static func load() -> Config {
-    let url = home.appendingPathComponent(".config/ft-forwarder/config.json")
+    let url = home.appendingPathComponent(".config/rex-to-nvim/config.json")
     guard let data = try? Data(contentsOf: url) else { return Config() }
     do {
       return try JSONDecoder().decode(Config.self, from: data)
@@ -177,7 +177,7 @@ struct Forwarder {
   init(config: Config) throws {
     self.config = config
     guard let rex = Forwarder.findRex(config) else {
-      throw ForwardError("Couldn't find the rex command. Set \"rex\" in ~/.config/ft-forwarder/config.json.")
+      throw ForwardError("Couldn't find the rex command. Set \"rex\" in ~/.config/rex-to-nvim/config.json.")
     }
     self.rex = rex
   }

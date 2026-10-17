@@ -56,19 +56,19 @@ for icon in devicons.sorted(by: { $0.ext.lowercased() < $1.ext.lowercased() }) {
   // Compound extensions (test.ts, d.ts) can't be told apart by LaunchServices.
   guard (try? validExt.wholeMatch(in: ext)) != nil, !seenExts.contains(ext), !exclude.contains(ext) else { continue }
 
+  let safe = ext.replacingOccurrences(of: "+", with: "plus")
+    .replacingOccurrences(of: "#", with: "sharp")
+    .replacingOccurrences(of: "_", with: "-")
   let uti: String
   let imported: Bool
-  // Types declared by an installed copy of this app don't count as known to macOS,
-  // or rebuilding would stop declaring them.
-  if let type = UTType(filenameExtension: ext), !type.isDynamic, !type.identifier.hasPrefix("\(bundleID).ext.") {
+  // Types declared by an installed copy of this app (under any bundle ID) don't
+  // count as known to macOS, or rebuilding would stop declaring them.
+  if let type = UTType(filenameExtension: ext), !type.isDynamic, !type.identifier.hasSuffix(".ext.\(safe)") {
     guard include.contains(ext) || type.conforms(to: .text) else { continue }
     uti = type.identifier
     imported = false
   } else {
     guard include.contains(ext) || icon.filetype != nil else { continue }
-    let safe = ext.replacingOccurrences(of: "+", with: "plus")
-      .replacingOccurrences(of: "#", with: "sharp")
-      .replacingOccurrences(of: "_", with: "-")
     uti = "\(bundleID).ext.\(safe)"
     imported = true
   }
@@ -116,7 +116,7 @@ let importedTypes: [[String: Any]] = docTypes.filter(\.imported).map { type in
 
 let plist: [String: Any] = [
   "CFBundleDevelopmentRegion": "en",
-  "CFBundleExecutable": "ft-forwarder",
+  "CFBundleExecutable": "rex-to-nvim",
   "CFBundleIdentifier": bundleID,
   "CFBundleInfoDictionaryVersion": "6.0",
   "CFBundleName": appName,

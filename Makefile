@@ -1,5 +1,5 @@
 APP_NAME ?= Neovim
-BUNDLE_ID ?= local.ft-forwarder.neovim
+BUNDLE_ID ?= local.rex-to-nvim
 VERSION ?= 0.1.0
 INSTALL_DIR ?= $(HOME)/Applications
 DEVICONS ?= $(HOME)/.local/share/nvim/lazy/nvim-web-devicons
@@ -14,7 +14,7 @@ LSREGISTER := /System/Library/Frameworks/CoreServices.framework/Frameworks/Launc
 
 all: app
 
-$(BUILD)/ft-forwarder: Sources/main.swift
+$(BUILD)/rex-to-nvim: Sources/main.swift
 	@mkdir -p $(BUILD)
 	swiftc -O -target arm64-apple-macos13.0 -o $@ $<
 
@@ -33,10 +33,10 @@ $(BUILD)/icons/.stamp: $(BUILD)/gen-icons $(BUILD)/Info.plist $(FONT)
 
 icons: $(BUILD)/icons/.stamp
 
-app: $(BUILD)/ft-forwarder $(BUILD)/Info.plist $(BUILD)/icons/.stamp
+app: $(BUILD)/rex-to-nvim $(BUILD)/Info.plist $(BUILD)/icons/.stamp
 	rm -rf "$(APP)"
 	mkdir -p "$(APP)/Contents/MacOS" "$(APP)/Contents/Resources"
-	cp $(BUILD)/ft-forwarder "$(APP)/Contents/MacOS/"
+	cp $(BUILD)/rex-to-nvim "$(APP)/Contents/MacOS/"
 	cp $(BUILD)/Info.plist "$(APP)/Contents/"
 	# A unique build number per build, so macOS drops its cached icons on install.
 	/usr/libexec/PlistBuddy -c "Set :CFBundleVersion $(VERSION).$$(date +%s)" "$(APP)/Contents/Info.plist"
@@ -46,6 +46,8 @@ app: $(BUILD)/ft-forwarder $(BUILD)/Info.plist $(BUILD)/icons/.stamp
 install: app
 	rm -rf "$(INSTALLED)"
 	ditto "$(APP)" "$(INSTALLED)"
+	# macOS registers the copy in build/ on its own; only the installed one should handle files.
+	-$(LSREGISTER) -u "$(APP)"
 	$(LSREGISTER) -f "$(INSTALLED)"
 	@echo "Installed $(INSTALLED)"
 

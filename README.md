@@ -1,4 +1,4 @@
-# ft-forwarder
+# rex-to-nvim
 
 A tiny macOS app that opens text files in Neovim inside a new Rex session. It registers as a handler for ~250 text
 file types, so you can pick it from Finder's **Open With** menu or make it the
@@ -40,11 +40,11 @@ make uninstall   # removes it and unregisters its file types
 `APP_NAME`, `BUNDLE_ID` and `INSTALL_DIR` can be overridden, e.g.
 `make install APP_NAME="Neovim (Rex)"`.
 
-Activity and errors are logged to `~/Library/Logs/ft-forwarder.log`.
+Activity and errors are logged to `~/Library/Logs/rex-to-nvim.log`.
 
 ## Configuration
 
-Optional, in `~/.config/ft-forwarder/config.json`:
+Optional, in `~/.config/rex-to-nvim/config.json`:
 
 ```json
 {
