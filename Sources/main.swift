@@ -5,6 +5,7 @@
 // soon as the files have been handed off. Failures go to the log.
 
 import AppKit
+import UniformTypeIdentifiers
 
 let rexBundleID = "com.superlogical.rex"
 let home = FileManager.default.homeDirectoryForCurrentUser
@@ -477,10 +478,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
   func application(_ application: NSApplication, open urls: [URL]) {
     receivedFiles = true
-    // Web links can arrive if this app ever becomes the default browser; pass them on.
-    let links = urls.filter { !$0.isFileURL }
-    if !links.isEmpty { handOff(links) }
-    let files = urls.filter(\.isFileURL)
+    // Web links (if this app ever becomes the default browser) and binary files
+    // (if it's the default for files macOS can't type) aren't for Neovim; pass them on.
+    let elsewhere = urls.filter { !$0.isFileURL || isBinary($0) }
+    if !elsewhere.isEmpty { handOff(elsewhere) }
+    let files = urls.filter { $0.isFileURL && !elsewhere.contains($0) }
     guard !files.isEmpty else {
       if pending == 0 { NSApp.terminate(nil) }
       return
@@ -507,16 +509,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
   }
 
-  /// Open non-file URLs in another app that handles them, since Rex can't.
-  private func handOff(_ links: [URL]) {
+  /// Files macOS can only call generic data (no extension, or one it doesn't
+  /// know) may be binary. Like git, treat a NUL byte in the first 8000 bytes as binary.
+  private func isBinary(_ url: URL) -> Bool {
+    guard let type = (try? url.resourceValues(forKeys: [.contentTypeKey]))?.contentType,
+          type == .data || type.isDynamic,
+          let handle = try? FileHandle(forReadingFrom: url) else { return false }
+    defer { try? handle.close() }
+    return ((try? handle.read(upToCount: 8000)) ?? Data()).contains(0)
+  }
+
+  /// Open URLs in another app that handles them, or reveal files nothing else
+  /// opens in Finder.
+  private func handOff(_ urls: [URL]) {
     let me = Bundle.main.bundleURL.standardizedFileURL
-    for link in links {
-      guard let other = NSWorkspace.shared.urlsForApplications(toOpen: link).first(where: { $0.standardizedFileURL != me }) else {
-        log("no other app can open \(link)")
+    for url in urls {
+      guard let other = NSWorkspace.shared.urlsForApplications(toOpen: url).first(where: { $0.standardizedFileURL != me }) else {
+        log("no other app can open \(url)")
+        if url.isFileURL { NSWorkspace.shared.activateFileViewerSelecting([url]) }
         continue
       }
-      log("handing \(link) to \(other.lastPathComponent)")
-      NSWorkspace.shared.open([link], withApplicationAt: other, configuration: NSWorkspace.OpenConfiguration())
+      log("handing \(url) to \(other.lastPathComponent)")
+      NSWorkspace.shared.open([url], withApplicationAt: other, configuration: NSWorkspace.OpenConfiguration())
     }
   }
 }

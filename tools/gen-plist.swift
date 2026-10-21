@@ -1,6 +1,6 @@
-// Builds the app's Info.plist from data/extensions.txt (what to claim) and
-// data/devicons.json (names and icons), mapping each extension to a system
-// type (UTI) or declaring one.
+// Builds the app's Info.plist from data/extensions.txt and data/content-types.txt
+// (what to claim) and data/devicons.json (names and icons), mapping each
+// extension to a system type (UTI) or declaring one.
 //
 // Usage: swift tools/gen-plist.swift <data-dir> <out-dir> <app-name> <bundle-id> <version>
 //
@@ -76,7 +76,7 @@ for ext in extensions {
   // count as known to macOS, or rebuilding would stop declaring them.
   if let type = UTType(filenameExtension: ext), !type.isDynamic, !type.identifier.hasSuffix(".ext.\(safe)") {
     guard !catchAllTypes.contains(type) else {
-      fail("macOS maps .\(ext) to the catch-all type \(type.identifier); remove it from extensions.txt")
+      fail("macOS maps .\(ext) to the catch-all type \(type.identifier); claim whole types in content-types.txt instead")
     }
     uti = type.identifier
     imported = false
@@ -93,6 +93,26 @@ for ext in extensions {
     let iconName = "doc-" + uti.replacingOccurrences(of: "\(bundleID).ext.", with: "").replacingOccurrences(of: ".", with: "-")
     docTypes.append(DocType(icon: iconName, name: icon.name, glyph: icon.glyph, color: icon.color, uti: uti, exts: [ext], imported: imported))
   }
+}
+
+// data/content-types.txt: whole types claimed regardless of extension, such as
+// plain text and extensionless files. Each line: identifier, devicons extension
+// for the icon (or -), display name.
+let contentTypesText = (try? String(contentsOf: dataDir.appendingPathComponent("content-types.txt"), encoding: .utf8)) ?? ""
+for line in contentTypesText.split(separator: "\n") {
+  let fields = line.split(separator: "#", maxSplits: 1, omittingEmptySubsequences: false)[0]
+    .split(whereSeparator: \.isWhitespace).map(String.init)
+  guard !fields.isEmpty else { continue }
+  guard fields.count >= 3, let type = UTType(fields[0]), !type.isDynamic else {
+    fail("expected \"<type identifier> <devicons extension or -> <name>\" in content-types.txt, got \"\(line)\"")
+  }
+  guard indexByUTI[type.identifier] == nil else { fail("\(type.identifier) is claimed twice") }
+  let icon = fields[1] == "-" ? defaultIcon : deviconByExt[fields[1]] ?? defaultIcon
+  let label = fields[1] == "-" ? [] : [fields[1]]
+  indexByUTI[type.identifier] = docTypes.count
+  docTypes.append(DocType(icon: "doc-" + type.identifier.replacingOccurrences(of: ".", with: "-"),
+                          name: fields[2...].joined(separator: " "), glyph: icon.glyph, color: icon.color,
+                          uti: type.identifier, exts: label, imported: false))
 }
 
 // A system type shared by several extensions takes its name and icon from the
@@ -157,5 +177,5 @@ let encoder = JSONEncoder()
 encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
 try encoder.encode(docTypes).write(to: outDir.appendingPathComponent("types.json"))
 
-let extCount = docTypes.reduce(0) { $0 + $1.exts.count }
-print("claimed \(extCount) extensions in \(docTypes.count) document types (\(importedTypes.count) declared by us)")
+let wholeTypes = docTypes.count - Set(docTypes.filter { $0.exts.contains(where: seenExts.contains) }.map(\.uti)).count
+print("claimed \(seenExts.count) extensions and \(wholeTypes) whole types in \(docTypes.count) document types (\(importedTypes.count) declared by us)")

@@ -202,19 +202,19 @@ func labelFont(_ size: CGFloat) -> CTFont {
 
 /// White page with the type's devicon glyph and, centered beneath it, its
 /// extension, both in the type's color. Small sizes drop the label and enlarge
-/// the glyph so it stays legible.
+/// the glyph so it stays legible; types without an extension have no label.
 func drawDocument(_ canvas: Canvas, glyph: String, color: CGColor, label: String, symbols: CTFont) {
-  let full = canvas.pixels >= 64
+  let labeled = canvas.pixels >= 64 && !label.isEmpty
   canvas.withShadow(dy: -10, blur: 28, color: hex("#000000", 0.25)) {
     canvas.fill(pagePath, paper)
     canvas.fill(foldPath, paperFold)
   }
 
-  let glyphSize: CGFloat = full ? 320 : 440
-  let glyphCenter = CGPoint(x: 512, y: full ? 570 : 512)
+  let glyphSize: CGFloat = labeled ? 320 : 440
+  let glyphCenter = CGPoint(x: 512, y: labeled ? 570 : 512)
   canvas.text(glyph, font: CTFontCreateCopyWithAttributes(symbols, glyphSize, nil, nil), color: color, center: glyphCenter)
 
-  if full {
+  if labeled {
     // Long extensions shrink to fit the page.
     let text = label.uppercased(), maxWidth: CGFloat = 540
     let width = CTLineGetTypographicBounds(makeLine(text, font: labelFont(130), kern: 4), nil, nil, nil)
@@ -280,7 +280,7 @@ DispatchQueue.concurrentPerform(iterations: types.count) { index in
   let color = readableOnPaper(hex(known ? type.color : fallbackColor))
   do {
     try writeIcns(type.icon, to: outDir) { canvas in
-      drawDocument(canvas, glyph: glyph, color: color, label: type.exts[0], symbols: symbols)
+      drawDocument(canvas, glyph: glyph, color: color, label: type.exts.first ?? "", symbols: symbols)
     }
   } catch {
     lock.lock(); failures += 1; lock.unlock()

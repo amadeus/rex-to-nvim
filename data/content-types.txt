@@ -1,0 +1,14 @@
+# Whole content types the app claims, beyond the extensions in extensions.txt.
+# Each line: a type identifier, the devicons extension to take its icon from
+# (or - for a generic one), and a display name.
+#
+# These are claimed as an alternative only: the app becomes their default
+# when you choose it with Get Info → Open with → Change All.
+
+# .txt, .text, README, and anything else macOS identifies as plain text.
+# Types that conform to it but have their own default (.csv in Numbers) keep it.
+public.plain-text  txt  Plain Text
+
+# Files macOS can't type: dotfiles like .zshrc and .gitignore, and other files
+# without an extension. Binary ones are passed on to another app, not opened.
+public.data        -    Document

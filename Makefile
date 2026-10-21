@@ -19,7 +19,7 @@ $(BUILD)/rex-to-nvim: Sources/main.swift
 	swiftc -O -target arm64-apple-macos13.0 -o $@ $<
 
 # Writes both Info.plist and types.json.
-$(BUILD)/Info.plist: tools/gen-plist.swift data/devicons.json data/extensions.txt
+$(BUILD)/Info.plist: tools/gen-plist.swift data/devicons.json data/extensions.txt data/content-types.txt
 	swift tools/gen-plist.swift data $(BUILD) "$(APP_NAME)" $(BUNDLE_ID) $(VERSION)
 
 $(BUILD)/gen-icons: tools/gen-icons.swift

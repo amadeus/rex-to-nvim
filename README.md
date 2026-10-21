@@ -1,6 +1,6 @@
 # rex-to-nvim
 
-A tiny macOS app that opens code files in Neovim inside Rex.
+A tiny macOS app that opens code and text files in Neovim inside Rex.
 Double-click a `.rs` file in Finder and it opens in Neovim: in the Neovim
 you already have running for that git repository if there is one, otherwise in
 a new Rex session at the repository root.
@@ -8,7 +8,7 @@ a new Rex session at the repository root.
 ![The app icon and some of its file icons](assets/readme/preview.png)
 
 The app shows up in Finder as **Neovim**. It handles ~220 code file types,
-gives each one an icon, and never stays running: it has no Dock icon and no
+plain text, and files without an extension, gives each one an icon, and never stays running: it has no Dock icon and no
 windows, hands each file off to Rex, and quits.
 
 rex-to-nvim is not affiliated with the Neovim project.
@@ -41,10 +41,19 @@ doesn't quarantine it.
 it as soon as it's installed: it declares those types itself.
 
 **File types other apps also handle** (`.ts`, `.json`, `.md`, `.swift`, `.svg`,
-…) stay with their current app. The app only lists itself as an alternative,
+`.txt`, …) stay with their current app. The app only lists itself as an alternative,
 so it appears in **Open With** but doesn't take them over. To switch one,
 select a file of that type in Finder, then **Get Info → Open with: Neovim →
 Change All…**
+
+**Plain text and files without an extension** work the same way:
+- **Get Info → Change All** on a `.txt` file makes Neovim the default for
+  everything macOS identifies as plain text, including `.text` and `README`.
+  Types with their own default, like `.csv` in Numbers, keep it.
+- Doing it on a dotfile like `.zshrc` makes Neovim the default for every file
+  macOS can't type: dotfiles, files without an extension, and files with an
+  extension it doesn't know. Binary ones among them are passed on to the
+  next app that can open them (TextEdit, usually), or shown in Finder.
 
 Opening the app on its own does nothing.
 
@@ -108,11 +117,14 @@ where. It's capped at 1 MB, plus one previous file.
 
 ## Which file types it claims
 
-Exactly the code extensions in `data/extensions.txt`. Edit that file and run
-`make install` to add or remove one. Each maps to the type macOS already uses
-for it, or the app declares one if macOS doesn't know it. The build refuses
-extensions macOS maps to a catch-all type like plain text, since claiming
-those would claim every text file.
+The code extensions in `data/extensions.txt`, plus the whole types in
+`data/content-types.txt`: plain text, and generic data for files without an
+extension. Edit either file and run `make install` to change what's claimed.
+
+Each extension maps to the type macOS already uses for it, or the app declares
+one if macOS doesn't know it. The build refuses extensions macOS maps to a
+catch-all type like plain text; those belong in `content-types.txt`, where
+it's clear the whole type is being claimed.
 
 Names, glyphs and colors come from
 [nvim-web-devicons](https://github.com/nvim-tree/nvim-web-devicons), snapshotted
@@ -126,10 +138,10 @@ make devicons   # or: make devicons DEVICONS=/path/to/nvim-web-devicons
 
 ```
 Sources/main.swift          the app: receives open events, finds Neovims, drives the rex CLI
-tools/gen-plist.swift       extensions.txt + devicons.json → Info.plist (+ build/types.json)
+tools/gen-plist.swift       extensions.txt + content-types.txt + devicons.json → Info.plist
 tools/gen-icons.swift       types.json → AppIcon.icns + one .icns per file type
 tools/export-devicons.lua   nvim-web-devicons → data/devicons.json
-data/                       extensions.txt (what to claim), devicons snapshot
+data/                       extensions.txt and content-types.txt (what to claim), devicons snapshot
 assets/fonts/               Symbols Nerd Font, for the document icon glyphs
 ```
 

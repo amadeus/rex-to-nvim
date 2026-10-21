@@ -8,7 +8,8 @@ and the traps found so far.
 
 A background-only macOS app (shown as **Neovim**, bundle ID `io.github.amadeus.rex-to-nvim`,
 executable `rex-to-nvim`) that registers as a handler for the code file types
-listed in `data/extensions.txt`.
+listed in `data/extensions.txt`, plus plain text and generic data (files
+without an extension) from `data/content-types.txt`.
 When macOS asks it to open files, it hands them to Rex and quits:
 
 - File in a git repo with a Neovim already running there in some Rex pane →
@@ -24,10 +25,11 @@ shows a dialog; failures are logged. Opening it on its own does nothing.
 | Path | Role |
 | --- | --- |
 | `Sources/main.swift` | The whole app: AppKit delegate, config, git root lookup, Rex and Neovim discovery, forwarding. |
-| `tools/gen-plist.swift` | Decides which extensions to claim and their UTIs. Writes `build/Info.plist` and `build/types.json`. |
+| `tools/gen-plist.swift` | Decides which extensions and whole types to claim and their UTIs. Writes `build/Info.plist` and `build/types.json`. |
 | `tools/gen-icons.swift` | Renders `AppIcon.icns` and one `doc-*.icns` per type from `build/types.json`. Compiled with `swiftc`, not run as a script, for speed. |
 | `tools/export-devicons.lua` | Refreshes `data/devicons.json` from nvim-web-devicons (`make devicons`). |
-| `data/extensions.txt` | The allowlist of code extensions the app claims. Code only: no plain text, logs, data, media. |
+| `data/extensions.txt` | The allowlist of code extensions the app claims. Code only: no logs, data formats, media. |
+| `data/content-types.txt` | Whole types claimed regardless of extension: `public.plain-text` and `public.data`. |
 | `assets/fonts/` | Symbols Nerd Font (MIT) for document icon glyphs. |
 | `assets/readme/preview.png` | README image, rendered from `build/icons`. Regenerate it if the icon design changes. |
 
@@ -100,6 +102,17 @@ There are no tests. Verify behavior by running the installed app (below).
   APIs report success but change nothing.
 - Changing the bundle ID makes macOS treat the app as new. Avoid it.
 
+- `public.data` is what macOS gives dotfiles (`.zshrc`), files without an
+  extension, and unknown extensions (their `dyn.*` types conform to it).
+  Binaries get it too, so when the app is the default for it, the app checks
+  files typed `public.data`/`dyn.*` for a NUL byte in the first 8000 bytes
+  (git's test) and hands binary ones to the next app that claims them, or
+  reveals them in Finder. Claiming `public.data` also lists the app in Open
+  With for nearly every file, as TextEdit is.
+- Extensionless files aren't all `public.data`: macOS sniffs some (`README` is
+  `public.plain-text`) and names others (`Makefile` is `public.make-source`).
+  Executable scripts are `public.unix-executable`, which the app doesn't claim.
+
 **Icons**
 - macOS caches icons per app. Each build stamps `CFBundleVersion` with a
   timestamp, but that alone may not refresh them; the user may need
@@ -162,6 +175,7 @@ There are no tests. Verify behavior by running the installed app (below).
 - Swift in a single file per target, two-space indent, doc comments on types
   and non-obvious functions, comments that explain *why*.
 - Keep the app forward-and-exit: no long-running work, no UI at all.
-- Only code extensions in `data/extensions.txt`.
+- Only code extensions in `data/extensions.txt`. Catch-all types (plain text,
+  data) go in `data/content-types.txt`, never via an extension.
 - Ask before changing the bundle ID or anything else that resets the user's
   file associations.
